@@ -1,3 +1,5 @@
+// +build linux
+
 package netlink
 
 import (
@@ -21,7 +23,6 @@ func testLinkAddDel(t *testing.T, link Link) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	num := len(links)
 
 	if err := LinkAdd(link); err != nil {
 		t.Fatal(err)
@@ -120,6 +121,30 @@ func testLinkAddDel(t *testing.T, link Link) {
 		}
 	}
 
+	if _, ok := link.(*Vti); ok {
+		_, ok := result.(*Vti)
+		if !ok {
+			t.Fatal("Result of create is not a vti")
+		}
+	}
+
+	if bond, ok := link.(*Bond); ok {
+		other, ok := result.(*Bond)
+		if !ok {
+			t.Fatal("Result of create is not a bond")
+		}
+		if bond.Mode != other.Mode {
+			t.Fatalf("Got unexpected mode: %d, expected: %d", other.Mode, bond.Mode)
+		}
+	}
+
+	if _, ok := link.(*Iptun); ok {
+		_, ok := result.(*Iptun)
+		if !ok {
+			t.Fatal("Result of create is not a iptun")
+		}
+	}
+
 	if err = LinkDel(link); err != nil {
 		t.Fatal(err)
 	}
@@ -129,9 +154,10 @@ func testLinkAddDel(t *testing.T, link Link) {
 		t.Fatal(err)
 	}
 
-	if len(links) != num {
-		t.Fatal("Link not removed properly")
-		return
+	for _, l := range links {
+		if l.Attrs().Name == link.Attrs().Name {
+			t.Fatal("Link not removed properly")
+		}
 	}
 }
 
@@ -211,7 +237,7 @@ func TestLinkAddDelBridge(t *testing.T) {
 	tearDown := setUpNetlinkTest(t)
 	defer tearDown()
 
-	testLinkAddDel(t, &Bridge{LinkAttrs{Name: "foo", MTU: 1400}})
+	testLinkAddDel(t, &Bridge{LinkAttrs: LinkAttrs{Name: "foo", MTU: 1400}})
 }
 
 func TestLinkAddDelGretap(t *testing.T) {
@@ -319,7 +345,9 @@ func TestLinkAddDelBond(t *testing.T) {
 	tearDown := setUpNetlinkTest(t)
 	defer tearDown()
 
-	testLinkAddDel(t, NewLinkBond(LinkAttrs{Name: "foo"}))
+	bond := NewLinkBond(LinkAttrs{Name: "foo"})
+	bond.Mode = StringToBondModeMap["802.3ad"]
+	testLinkAddDel(t, bond)
 }
 
 func TestLinkAddVethWithDefaultTxQLen(t *testing.T) {
@@ -419,7 +447,7 @@ func TestLinkAddDelBridgeMaster(t *testing.T) {
 	tearDown := setUpNetlinkTest(t)
 	defer tearDown()
 
-	master := &Bridge{LinkAttrs{Name: "foo"}}
+	master := &Bridge{LinkAttrs: LinkAttrs{Name: "foo"}}
 	if err := LinkAdd(master); err != nil {
 		t.Fatal(err)
 	}
@@ -434,12 +462,12 @@ func TestLinkSetUnsetResetMaster(t *testing.T) {
 	tearDown := setUpNetlinkTest(t)
 	defer tearDown()
 
-	master := &Bridge{LinkAttrs{Name: "foo"}}
+	master := &Bridge{LinkAttrs: LinkAttrs{Name: "foo"}}
 	if err := LinkAdd(master); err != nil {
 		t.Fatal(err)
 	}
 
-	newmaster := &Bridge{LinkAttrs{Name: "bar"}}
+	newmaster := &Bridge{LinkAttrs: LinkAttrs{Name: "bar"}}
 	if err := LinkAdd(newmaster); err != nil {
 		t.Fatal(err)
 	}
@@ -449,7 +477,7 @@ func TestLinkSetUnsetResetMaster(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	nonexistsmaster := &Bridge{LinkAttrs{Name: "foobar"}}
+	nonexistsmaster := &Bridge{LinkAttrs: LinkAttrs{Name: "foobar"}}
 
 	if err := LinkSetMaster(slave, nonexistsmaster); err == nil {
 		t.Fatal("error expected")
@@ -796,6 +824,49 @@ func TestLinkSet(t *testing.T) {
 	}
 }
 
+func TestLinkSetARP(t *testing.T) {
+	tearDown := setUpNetlinkTest(t)
+	defer tearDown()
+
+	iface := &Veth{LinkAttrs: LinkAttrs{Name: "foo", TxQLen: testTxQLen, MTU: 1500}, PeerName: "banana"}
+	if err := LinkAdd(iface); err != nil {
+		t.Fatal(err)
+	}
+
+	link, err := LinkByName("foo")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = LinkSetARPOff(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	link, err = LinkByName("foo")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if link.Attrs().RawFlags&syscall.IFF_NOARP != uint32(syscall.IFF_NOARP) {
+		t.Fatalf("NOARP was not set!")
+	}
+
+	err = LinkSetARPOn(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	link, err = LinkByName("foo")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if link.Attrs().RawFlags&syscall.IFF_NOARP != 0 {
+		t.Fatalf("NOARP is still set!")
+	}
+}
+
 func expectLinkUpdate(ch <-chan LinkUpdate, ifaceName string, up bool) bool {
 	for {
 		timeout := time.After(time.Minute)
@@ -848,6 +919,8 @@ func TestLinkSubscribe(t *testing.T) {
 }
 
 func TestLinkSubscribeAt(t *testing.T) {
+	skipUnlessRoot(t)
+
 	// Create an handle on a custom netns
 	newNs, err := netns.New()
 	if err != nil {
@@ -940,5 +1013,237 @@ func TestLinkStats(t *testing.T) {
 	if v0Stats.RxPackets != v1Stats.TxPackets || v0Stats.TxPackets != v1Stats.RxPackets ||
 		v0Stats.RxBytes != v1Stats.TxBytes || v0Stats.TxBytes != v1Stats.RxBytes {
 		t.Fatalf("veth ends counters differ:\n%v\n%v", v0Stats, v1Stats)
+	}
+}
+
+func TestLinkXdp(t *testing.T) {
+	links, err := LinkList()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var testXdpLink Link
+	for _, link := range links {
+		if link.Attrs().Xdp != nil && !link.Attrs().Xdp.Attached {
+			testXdpLink = link
+			break
+		}
+	}
+	if testXdpLink == nil {
+		t.Skipf("No link supporting XDP found")
+	}
+	fd, err := loadSimpleBpf(BPF_PROG_TYPE_XDP, 2 /*XDP_PASS*/)
+	if err != nil {
+		t.Skipf("Loading bpf program failed: %s", err)
+	}
+	if err := LinkSetXdpFd(testXdpLink, fd); err != nil {
+		t.Fatal(err)
+	}
+	if err := LinkSetXdpFd(testXdpLink, -1); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLinkAddDelIptun(t *testing.T) {
+	tearDown := setUpNetlinkTest(t)
+	defer tearDown()
+
+	testLinkAddDel(t, &Iptun{
+		LinkAttrs: LinkAttrs{Name: "iptunfoo"},
+		PMtuDisc:  1,
+		Local:     net.IPv4(127, 0, 0, 1),
+		Remote:    net.IPv4(127, 0, 0, 1)})
+}
+
+func TestLinkAddDelVti(t *testing.T) {
+	tearDown := setUpNetlinkTest(t)
+	defer tearDown()
+
+	testLinkAddDel(t, &Vti{
+		LinkAttrs: LinkAttrs{Name: "vtifoo"},
+		IKey:      0x101,
+		OKey:      0x101,
+		Local:     net.IPv4(127, 0, 0, 1),
+		Remote:    net.IPv4(127, 0, 0, 1)})
+}
+
+func TestBridgeCreationWithMulticastSnooping(t *testing.T) {
+	if os.Getenv("TRAVIS_BUILD_DIR") != "" {
+		t.Skipf("Travis CI worker Linux kernel version (3.13) is too old for this test")
+	}
+
+	tearDown := setUpNetlinkTest(t)
+	defer tearDown()
+
+	bridgeWithDefaultMcastSnoopName := "foo"
+	bridgeWithDefaultMcastSnoop := &Bridge{LinkAttrs: LinkAttrs{Name: bridgeWithDefaultMcastSnoopName}}
+	if err := LinkAdd(bridgeWithDefaultMcastSnoop); err != nil {
+		t.Fatal(err)
+	}
+	expectMcastSnooping(t, bridgeWithDefaultMcastSnoopName, true)
+	if err := LinkDel(bridgeWithDefaultMcastSnoop); err != nil {
+		t.Fatal(err)
+	}
+
+	mcastSnoop := true
+	bridgeWithMcastSnoopOnName := "bar"
+	bridgeWithMcastSnoopOn := &Bridge{LinkAttrs: LinkAttrs{Name: bridgeWithMcastSnoopOnName}, MulticastSnooping: &mcastSnoop}
+	if err := LinkAdd(bridgeWithMcastSnoopOn); err != nil {
+		t.Fatal(err)
+	}
+	expectMcastSnooping(t, bridgeWithMcastSnoopOnName, true)
+	if err := LinkDel(bridgeWithMcastSnoopOn); err != nil {
+		t.Fatal(err)
+	}
+
+	mcastSnoop = false
+	bridgeWithMcastSnoopOffName := "foobar"
+	bridgeWithMcastSnoopOff := &Bridge{LinkAttrs: LinkAttrs{Name: bridgeWithMcastSnoopOffName}, MulticastSnooping: &mcastSnoop}
+	if err := LinkAdd(bridgeWithMcastSnoopOff); err != nil {
+		t.Fatal(err)
+	}
+	expectMcastSnooping(t, bridgeWithMcastSnoopOffName, false)
+	if err := LinkDel(bridgeWithMcastSnoopOff); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestBridgeSetMcastSnoop(t *testing.T) {
+	if os.Getenv("TRAVIS_BUILD_DIR") != "" {
+		t.Skipf("Travis CI worker Linux kernel version (3.13) is too old for this test")
+	}
+
+	tearDown := setUpNetlinkTest(t)
+	defer tearDown()
+
+	bridgeName := "foo"
+	bridge := &Bridge{LinkAttrs: LinkAttrs{Name: bridgeName}}
+	if err := LinkAdd(bridge); err != nil {
+		t.Fatal(err)
+	}
+	expectMcastSnooping(t, bridgeName, true)
+
+	if err := BridgeSetMcastSnoop(bridge, false); err != nil {
+		t.Fatal(err)
+	}
+	expectMcastSnooping(t, bridgeName, false)
+
+	if err := BridgeSetMcastSnoop(bridge, true); err != nil {
+		t.Fatal(err)
+	}
+	expectMcastSnooping(t, bridgeName, true)
+
+	if err := LinkDel(bridge); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func expectMcastSnooping(t *testing.T, linkName string, expected bool) {
+	bridge, err := LinkByName(linkName)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if actual := *bridge.(*Bridge).MulticastSnooping; actual != expected {
+		t.Fatalf("expected %t got %t", expected, actual)
+	}
+}
+
+func TestBridgeCreationWithHelloTime(t *testing.T) {
+	if os.Getenv("TRAVIS_BUILD_DIR") != "" {
+		t.Skipf("Travis CI worker Linux kernel version (3.13) is too old for this test")
+	}
+
+	tearDown := setUpNetlinkTest(t)
+	defer tearDown()
+
+	bridgeWithSpecifiedHelloTimeName := "foo"
+	helloTime := uint32(300)
+	bridgeWithSpecifiedHelloTime := &Bridge{LinkAttrs: LinkAttrs{Name: bridgeWithSpecifiedHelloTimeName}, HelloTime: &helloTime}
+	if err := LinkAdd(bridgeWithSpecifiedHelloTime); err != nil {
+		t.Fatal(err)
+	}
+
+	retrievedBridge, err := LinkByName(bridgeWithSpecifiedHelloTimeName)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	actualHelloTime := *retrievedBridge.(*Bridge).HelloTime
+	if actualHelloTime != helloTime {
+		t.Fatalf("expected %d got %d", helloTime, actualHelloTime)
+	}
+	if err := LinkDel(bridgeWithSpecifiedHelloTime); err != nil {
+		t.Fatal(err)
+	}
+
+	bridgeWithDefaultHelloTimeName := "bar"
+	bridgeWithDefaultHelloTime := &Bridge{LinkAttrs: LinkAttrs{Name: bridgeWithDefaultHelloTimeName}}
+	if err := LinkAdd(bridgeWithDefaultHelloTime); err != nil {
+		t.Fatal(err)
+	}
+
+	retrievedBridge, err = LinkByName(bridgeWithDefaultHelloTimeName)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	actualHelloTime = *retrievedBridge.(*Bridge).HelloTime
+	if actualHelloTime != 200 {
+		t.Fatalf("expected %d got %d", 200, actualHelloTime)
+	}
+	if err := LinkDel(bridgeWithDefaultHelloTime); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLinkSubscribeWithProtinfo(t *testing.T) {
+	tearDown := setUpNetlinkTest(t)
+	defer tearDown()
+
+	master := &Bridge{LinkAttrs: LinkAttrs{Name: "foo"}}
+	if err := LinkAdd(master); err != nil {
+		t.Fatal(err)
+	}
+
+	slave := &Veth{
+		LinkAttrs: LinkAttrs{
+			Name:        "bar",
+			TxQLen:      testTxQLen,
+			MTU:         1400,
+			MasterIndex: master.Attrs().Index,
+		},
+		PeerName: "bar-peer",
+	}
+	if err := LinkAdd(slave); err != nil {
+		t.Fatal(err)
+	}
+
+	ch := make(chan LinkUpdate)
+	done := make(chan struct{})
+	defer close(done)
+	if err := LinkSubscribe(ch, done); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := LinkSetHairpin(slave, true); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case update := <-ch:
+		if !(update.Attrs().Name == "bar" && update.Attrs().Protinfo != nil &&
+			update.Attrs().Protinfo.Hairpin) {
+			t.Fatal("Hairpin update not received as expected")
+		}
+	case <-time.After(time.Minute):
+		t.Fatal("Hairpin update timed out")
+	}
+
+	if err := LinkDel(slave); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := LinkDel(master); err != nil {
+		t.Fatal(err)
 	}
 }

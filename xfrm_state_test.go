@@ -1,3 +1,5 @@
+// +build linux
+
 package netlink
 
 import (
@@ -56,6 +58,26 @@ func testXfrmStateAddGetDel(t *testing.T, state *XfrmState) {
 
 	if _, err := XfrmStateGet(state); err == nil {
 		t.Fatalf("Unexpected success")
+	}
+}
+
+func TestXfrmStateAllocSpi(t *testing.T) {
+	setUpNetlinkTest(t)()
+
+	state := getBaseState()
+	state.Spi = 0
+	state.Auth = nil
+	state.Crypt = nil
+	rstate, err := XfrmStateAllocSpi(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rstate.Spi == 0 {
+		t.Fatalf("SPI is not allocated")
+	}
+	rstate.Spi = 0
+	if !compareStates(state, rstate) {
+		t.Fatalf("State not properly allocated")
 	}
 }
 
@@ -160,8 +182,9 @@ func TestXfrmStateUpdateLimits(t *testing.T) {
 
 func getBaseState() *XfrmState {
 	return &XfrmState{
-		Src:   net.ParseIP("127.0.0.1"),
-		Dst:   net.ParseIP("127.0.0.2"),
+		// Force 4 byte notation for the IPv4 addresses
+		Src:   net.ParseIP("127.0.0.1").To4(),
+		Dst:   net.ParseIP("127.0.0.2").To4(),
 		Proto: XFRM_PROTO_ESP,
 		Mode:  XFRM_MODE_TUNNEL,
 		Spi:   1,
@@ -184,6 +207,7 @@ func getAeadState() *XfrmState {
 	// 128 key bits + 32 salt bits
 	k, _ := hex.DecodeString("d0562776bf0e75830ba3f7f8eb6c09b555aa1177")
 	return &XfrmState{
+		// Leave IPv4 addresses in Ipv4 in IPv6 notation
 		Src:   net.ParseIP("192.168.1.1"),
 		Dst:   net.ParseIP("192.168.2.2"),
 		Proto: XFRM_PROTO_ESP,
