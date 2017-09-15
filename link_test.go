@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/vishvananda/netlink/nl"
 	"github.com/vishvananda/netns"
 )
 
@@ -136,12 +137,49 @@ func testLinkAddDel(t *testing.T, link Link) {
 		if bond.Mode != other.Mode {
 			t.Fatalf("Got unexpected mode: %d, expected: %d", other.Mode, bond.Mode)
 		}
+		// Mode specific checks
+		if os.Getenv("TRAVIS_BUILD_DIR") != "" {
+			t.Log("Kernel in travis is too old for this check")
+		} else {
+			switch mode := bondModeToString[bond.Mode]; mode {
+			case "802.3ad":
+				if bond.AdSelect != other.AdSelect {
+					t.Fatalf("Got unexpected AdSelect: %d, expected: %d", other.AdSelect, bond.AdSelect)
+				}
+				if bond.AdActorSysPrio != other.AdActorSysPrio {
+					t.Fatalf("Got unexpected AdActorSysPrio: %d, expected: %d", other.AdActorSysPrio, bond.AdActorSysPrio)
+				}
+				if bond.AdUserPortKey != other.AdUserPortKey {
+					t.Fatalf("Got unexpected AdUserPortKey: %d, expected: %d", other.AdUserPortKey, bond.AdUserPortKey)
+				}
+				if bytes.Compare(bond.AdActorSystem, other.AdActorSystem) != 0 {
+					t.Fatalf("Got unexpected AdActorSystem: %d, expected: %d", other.AdActorSystem, bond.AdActorSystem)
+				}
+			case "balance-tlb":
+				if bond.TlbDynamicLb != other.TlbDynamicLb {
+					t.Fatalf("Got unexpected TlbDynamicLb: %d, expected: %d", other.TlbDynamicLb, bond.TlbDynamicLb)
+				}
+			}
+		}
 	}
 
 	if _, ok := link.(*Iptun); ok {
 		_, ok := result.(*Iptun)
 		if !ok {
 			t.Fatal("Result of create is not a iptun")
+		}
+	}
+
+	if _, ok := link.(*Gretap); ok {
+		_, ok := result.(*Gretap)
+		if !ok {
+			t.Fatal("Result of create is not a Gretap")
+		}
+	}
+	if _, ok := link.(*Gretun); ok {
+		_, ok := result.(*Gretun)
+		if !ok {
+			t.Fatal("Result of create is not a Gretun")
 		}
 	}
 
@@ -195,6 +233,9 @@ func compareVxlan(t *testing.T, expected, actual *Vxlan) {
 	}
 	if actual.GBP != expected.GBP {
 		t.Fatal("Vxlan.GBP doesn't match")
+	}
+	if actual.FlowBased != expected.FlowBased {
+		t.Fatal("Vxlan.FlowBased doesn't match")
 	}
 	if expected.NoAge {
 		if !actual.NoAge {
@@ -251,6 +292,40 @@ func TestLinkAddDelGretap(t *testing.T) {
 		PMtuDisc:  1,
 		Local:     net.IPv4(127, 0, 0, 1),
 		Remote:    net.IPv4(127, 0, 0, 1)})
+}
+
+func TestLinkAddDelGretun(t *testing.T) {
+	tearDown := setUpNetlinkTest(t)
+	defer tearDown()
+
+	testLinkAddDel(t, &Gretun{
+		LinkAttrs: LinkAttrs{Name: "foo"},
+		Local:     net.IPv4(127, 0, 0, 1),
+		Remote:    net.IPv4(127, 0, 0, 1)})
+}
+
+func TestLinkAddDelGretunPointToMultiPoint(t *testing.T) {
+	tearDown := setUpNetlinkTest(t)
+	defer tearDown()
+
+	testLinkAddDel(t, &Gretun{
+		LinkAttrs: LinkAttrs{Name: "foo"},
+		Local:     net.IPv4(127, 0, 0, 1),
+		IKey:      1234,
+		OKey:      1234})
+}
+
+func TestLinkAddDelGretapFlowBased(t *testing.T) {
+	if os.Getenv("TRAVIS_BUILD_DIR") != "" {
+		t.Skipf("Kernel in travis is too old for this test")
+	}
+
+	tearDown := setUpNetlinkTest(t)
+	defer tearDown()
+
+	testLinkAddDel(t, &Gretap{
+		LinkAttrs: LinkAttrs{Name: "foo"},
+		FlowBased: true})
 }
 
 func TestLinkAddDelVlan(t *testing.T) {
@@ -345,9 +420,21 @@ func TestLinkAddDelBond(t *testing.T) {
 	tearDown := setUpNetlinkTest(t)
 	defer tearDown()
 
-	bond := NewLinkBond(LinkAttrs{Name: "foo"})
-	bond.Mode = StringToBondModeMap["802.3ad"]
-	testLinkAddDel(t, bond)
+	modes := []string{"802.3ad", "balance-tlb"}
+	for _, mode := range modes {
+		bond := NewLinkBond(LinkAttrs{Name: "foo"})
+		bond.Mode = StringToBondModeMap[mode]
+		switch mode {
+		case "802.3ad":
+			bond.AdSelect = BondAdSelect(BOND_AD_SELECT_BANDWIDTH)
+			bond.AdActorSysPrio = 1
+			bond.AdUserPortKey = 1
+			bond.AdActorSystem, _ = net.ParseMAC("06:aa:bb:cc:dd:ee")
+		case "balance-tlb":
+			bond.TlbDynamicLb = 1
+		}
+		testLinkAddDel(t, bond)
+	}
 }
 
 func TestLinkAddVethWithDefaultTxQLen(t *testing.T) {
@@ -657,6 +744,25 @@ func TestLinkAddDelVxlanGbp(t *testing.T) {
 	}
 }
 
+func TestLinkAddDelVxlanFlowBased(t *testing.T) {
+	if os.Getenv("TRAVIS_BUILD_DIR") != "" {
+		t.Skipf("Kernel in travis is too old for this test")
+	}
+
+	tearDown := setUpNetlinkTest(t)
+	defer tearDown()
+
+	vxlan := Vxlan{
+		LinkAttrs: LinkAttrs{
+			Name: "foo",
+		},
+		Learning:  false,
+		FlowBased: true,
+	}
+
+	testLinkAddDel(t, &vxlan)
+}
+
 func TestLinkAddDelIPVlanL2(t *testing.T) {
 	if os.Getenv("TRAVIS_BUILD_DIR") != "" {
 		t.Skipf("Kernel in travis is too old for this test")
@@ -783,6 +889,20 @@ func TestLinkSet(t *testing.T) {
 
 	if link.Attrs().MTU != 1400 {
 		t.Fatal("MTU not changed!")
+	}
+
+	err = LinkSetTxQLen(link, 500)
+	if err != nil {
+		t.Fatalf("Could not set txqlen: %v", err)
+	}
+
+	link, err = LinkByName("bar")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if link.Attrs().TxQLen != 500 {
+		t.Fatal("txqlen not changed!")
 	}
 
 	addr, err := net.ParseMAC("00:12:34:56:78:AB")
@@ -1038,6 +1158,9 @@ func TestLinkXdp(t *testing.T) {
 	if err := LinkSetXdpFd(testXdpLink, fd); err != nil {
 		t.Fatal(err)
 	}
+	if err := LinkSetXdpFdWithFlags(testXdpLink, fd, nl.XDP_FLAGS_UPDATE_IF_NOEXIST); err != syscall.EBUSY {
+		t.Fatal(err)
+	}
 	if err := LinkSetXdpFd(testXdpLink, -1); err != nil {
 		t.Fatal(err)
 	}
@@ -1245,5 +1368,62 @@ func TestLinkSubscribeWithProtinfo(t *testing.T) {
 
 	if err := LinkDel(master); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func testGTPLink(t *testing.T) *GTP {
+	conn1, err := net.ListenUDP("udp", &net.UDPAddr{
+		IP:   net.ParseIP("0.0.0.0"),
+		Port: 3386,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn2, err := net.ListenUDP("udp", &net.UDPAddr{
+		IP:   net.ParseIP("0.0.0.0"),
+		Port: 2152,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fd1, _ := conn1.File()
+	fd2, _ := conn2.File()
+	return &GTP{
+		LinkAttrs: LinkAttrs{
+			Name: "gtp0",
+		},
+		FD0: int(fd1.Fd()),
+		FD1: int(fd2.Fd()),
+	}
+}
+
+func TestLinkAddDelGTP(t *testing.T) {
+	tearDown := setUpNetlinkTestWithKModule(t, "gtp")
+	defer tearDown()
+	gtp := testGTPLink(t)
+	testLinkAddDel(t, gtp)
+}
+
+func TestLinkByNameWhenLinkIsNotFound(t *testing.T) {
+	_, err := LinkByName("iammissing")
+	if err == nil {
+		t.Fatal("Link not expected to found")
+	}
+
+	_, ok := err.(LinkNotFoundError)
+	if !ok {
+		t.Errorf("Error returned expected to of LinkNotFoundError type: %v", err)
+	}
+}
+
+func TestLinkByAliasWhenLinkIsNotFound(t *testing.T) {
+	_, err := LinkByAlias("iammissing")
+	if err == nil {
+		t.Fatal("Link not expected to found")
+	}
+
+	_, ok := err.(LinkNotFoundError)
+	if !ok {
+		t.Errorf("Error returned expected to of LinkNotFoundError type: %v", err)
 	}
 }
