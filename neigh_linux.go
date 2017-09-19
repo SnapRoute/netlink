@@ -128,6 +128,7 @@ func (h *Handle) NeighDel(neigh *Neigh) error {
 
 func neighHandle(neigh *Neigh, req *nl.NetlinkRequest) error {
 	var family int
+
 	if neigh.Family > 0 {
 		family = neigh.Family
 	} else {
@@ -151,8 +152,13 @@ func neighHandle(neigh *Neigh, req *nl.NetlinkRequest) error {
 	dstData := nl.NewRtAttr(NDA_DST, ipData)
 	req.AddData(dstData)
 
-	hwData := nl.NewRtAttr(NDA_LLADDR, []byte(neigh.HardwareAddr))
-	req.AddData(hwData)
+	if neigh.LLIPAddr != nil {
+		llIPData := nl.NewRtAttr(NDA_LLADDR, neigh.LLIPAddr.To4())
+		req.AddData(llIPData)
+	} else if neigh.Flags != NTF_PROXY || neigh.HardwareAddr != nil {
+		hwData := nl.NewRtAttr(NDA_LLADDR, []byte(neigh.HardwareAddr))
+		req.AddData(hwData)
+	}
 
 	_, err := req.Execute(syscall.NETLINK_ROUTE, 0)
 	return err
@@ -165,14 +171,33 @@ func NeighList(linkIndex, family int) ([]Neigh, error) {
 	return pkgHandle.NeighList(linkIndex, family)
 }
 
+// NeighProxyList gets a list of neighbor proxies in the system.
+// Equivalent to: `ip neighbor show proxy`.
+// The list can be filtered by link and ip family.
+func NeighProxyList(linkIndex, family int) ([]Neigh, error) {
+	return pkgHandle.NeighProxyList(linkIndex, family)
+}
+
 // NeighList gets a list of IP-MAC mappings in the system (ARP table).
 // Equivalent to: `ip neighbor show`.
 // The list can be filtered by link and ip family.
 func (h *Handle) NeighList(linkIndex, family int) ([]Neigh, error) {
+	return h.neighList(linkIndex, family, 0)
+}
+
+// NeighProxyList gets a list of neighbor proxies in the system.
+// Equivalent to: `ip neighbor show proxy`.
+// The list can be filtered by link, ip family.
+func (h *Handle) NeighProxyList(linkIndex, family int) ([]Neigh, error) {
+	return h.neighList(linkIndex, family, NTF_PROXY)
+}
+
+func (h *Handle) neighList(linkIndex, family, flags int) ([]Neigh, error) {
 	req := h.newNetlinkRequest(syscall.RTM_GETNEIGH, syscall.NLM_F_DUMP)
 	msg := Ndmsg{
 		Family: uint8(family),
 		Index:  uint32(linkIndex),
+		Flags:  uint8(flags),
 	}
 	req.AddData(&msg)
 
@@ -216,12 +241,33 @@ func NeighDeserialize(m []byte) (*Neigh, error) {
 		return nil, err
 	}
 
+	// This should be cached for perfomance
+	// once per table dump
+	link, err := LinkByIndex(neigh.LinkIndex)
+	if err != nil {
+		return nil, err
+	}
+	encapType := link.Attrs().EncapType
+
 	for _, attr := range attrs {
 		switch attr.Attr.Type {
 		case NDA_DST:
 			neigh.IP = net.IP(attr.Value)
 		case NDA_LLADDR:
-			neigh.HardwareAddr = net.HardwareAddr(attr.Value)
+			// BUG: Is this a bug in the netlink library?
+			// #define RTA_LENGTH(len) (RTA_ALIGN(sizeof(struct rtattr)) + (len))
+			// #define RTA_PAYLOAD(rta) ((int)((rta)->rta_len) - RTA_LENGTH(0))
+			attrLen := attr.Attr.Len - syscall.SizeofRtAttr
+			if attrLen == 4 && (encapType == "ipip" ||
+				encapType == "sit" ||
+				encapType == "gre") {
+				neigh.LLIPAddr = net.IP(attr.Value)
+			} else if attrLen == 16 &&
+				encapType == "tunnel6" {
+				neigh.IP = net.IP(attr.Value)
+			} else {
+				neigh.HardwareAddr = net.HardwareAddr(attr.Value)
+			}
 		}
 	}
 
